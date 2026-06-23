@@ -1,5 +1,6 @@
 cleanupUnusedCatalogs: true
 linkWorkspacePackages: true
+minimumReleaseAge: 1
 preferWorkspacePackages: true
 
 packages:
