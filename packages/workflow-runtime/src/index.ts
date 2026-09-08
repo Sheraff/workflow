@@ -12,6 +12,12 @@ export type {
 } from './schedule-materializer'
 
 export type {
+  WorkflowTelemetryOptions,
+  WorkflowTelemetrySpanContext,
+  WorkflowTelemetryStepMetaContext,
+} from '@tanstack/workflow-core'
+
+export type {
   AppendEventsArgs,
   AppendEventsResult,
   ClaimDueScheduleBucketsArgs,
@@ -61,6 +67,7 @@ export type {
   WorkflowRuntimeDeliverApprovalArgs,
   WorkflowRuntimeDeliverSignalArgs,
   WorkflowRuntimeDefinition,
+  WorkflowRuntimeEventPublisher,
   WorkflowRuntimeRunResult,
   WorkflowRuntimeRunResultKind,
   WorkflowRuntimeStartRunArgs,

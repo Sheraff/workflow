@@ -18,6 +18,12 @@ import { defineWorkflowRuntime } from '@tanstack/workflow-runtime'
 const runtime = defineWorkflowRuntime({
   store,
   defaultLeaseMs: 30_000,
+  publish: async (runId, event) => {
+    await eventBus.publish(runId, event)
+  },
+  telemetry: {
+    spanNamePrefix: 'tanstack.workflow',
+  },
   workflows: {
     checkout: {
       load: async () => checkoutWorkflow,
@@ -31,6 +37,43 @@ const runtime = defineWorkflowRuntime({
 })
 ```
 
+### Telemetry
+
+Workflow emits OpenTelemetry traces through `@opentelemetry/api`. Applications
+own SDK/exporter setup. If no SDK is configured, spans are no-ops.
+
+```ts
+const runtime = defineWorkflowRuntime({
+  store,
+  workflows,
+  telemetry: {
+    attributes: ({ workflowId, runId }) => ({
+      'app.workflow': workflowId ?? 'unknown',
+      'app.run': runId ?? 'unknown',
+    }),
+    mapStepMeta: (meta) => ({
+      'app.step_name': String(meta.name),
+    }),
+  },
+})
+```
+
+Set `telemetry: false` or `telemetry: { enabled: false }` to disable tracing.
+
+`WorkflowTelemetryOptions`:
+
+| Option | Purpose |
+| --- | --- |
+| `enabled` | Set false to disable tracing. |
+| `tracer` | Custom OpenTelemetry `Tracer`. Defaults to the global tracer provider. |
+| `spanNamePrefix` | Prefix for Workflow span names. Defaults to `tanstack.workflow`. |
+| `attributes` | Safe shared attributes or a function that returns them per span. |
+| `recordExceptions` | Whether to call `span.recordException`. Defaults to true. |
+| `mapStepMeta` | Optional mapper for safe `ctx.step(..., { meta })` attributes. |
+
+Workflow never records workflow input, output, signal payloads, step results, or
+raw step metadata as attributes by default.
+
 ### Workflow registration
 
 | Field | Purpose |
@@ -39,6 +82,44 @@ const runtime = defineWorkflowRuntime({
 | `version` | Current workflow version for new runs. |
 | `previousVersions` | Loaders for old versions that still have paused runs. |
 | `schedules` | Registered recurring schedules for this workflow. |
+
+## Runtime deadlines
+
+Every runtime method that can drive workflow code accepts the same budget
+options:
+
+| Option | Purpose |
+| --- | --- |
+| `deadline` | Absolute wall-clock deadline in UTC milliseconds. |
+| `maxDurationMs` | Maximum wall-clock duration for this runtime call. |
+| `minYieldRemainingMs` | Budget reserved before fresh durable work. Defaults to 1000ms. |
+
+When both deadline forms are present, the earlier deadline wins. The runtime
+checks the budget before fresh `step`, `now`, and `uuid` work. A low budget
+pauses the run on a durable timer, releases its lease, and lets a later sweep
+resume it. Existing `sleep`, `waitForEvent`, and `approve` calls already pause.
+
+Step timeouts remain per-attempt limits and do not use the runtime deadline.
+
+## Leases and recovery
+
+The runtime renews an owned run lease every third of `leaseMs` while workflow
+code is running. It stops renewal before releasing the lease on completion,
+pause, yield, or error. `leaseMs` must be a positive finite number.
+
+`runtime.sweep()` also claims expired running executions and replays them from
+their durable checkpoints. Completed steps are not executed again. Fresh steps
+remain at-least-once operations, so external side effects still need
+idempotency keys.
+
+## Live events
+
+Set `publish` on the runtime or an individual runtime call to receive events as
+they are emitted. When both are present, both publishers run. Fan-out is
+best-effort: publisher failures do not change durable execution.
+
+`publish` is independent of `includeEvents`. A host can stream live events while
+setting `includeEvents: false` to avoid retaining them in the final result.
 
 ## `runtime.startRun`
 
@@ -63,11 +144,15 @@ Options:
 | `runId` | Stable run identifier. |
 | `input` | Workflow input for new runs. |
 | `now` | Override current time for tests or host events. |
+| `deadline` | Absolute wall-clock deadline in UTC milliseconds. |
+| `maxDurationMs` | Maximum wall-clock duration for this call. |
+| `minYieldRemainingMs` | Budget reserved before fresh durable work. |
 | `leaseOwner` | Worker identity used while executing. |
 | `leaseMs` | Lease duration. |
 | `threadId` | Optional core engine thread ID. |
 | `includeEvents` | Whether to retain emitted events in the result. Defaults to true. |
 | `maxEvents` | Maximum retained events when `includeEvents` is true. |
+| `publish` | Best-effort live event publisher for this drive. |
 
 ## `runtime.deliverSignal`
 
@@ -101,12 +186,13 @@ await runtime.deliverApproval({
 
 ## `runtime.sweep`
 
-Claims due schedules and timers, then drives them to completion or the next
-pause.
+Recovers stale running executions, then claims due schedules and timers and
+drives them to completion or the next pause.
 
 ```ts
 const result = await runtime.sweep({
   now: Date.now(),
+  maxRecoveredRuns: 25,
   maxScheduledRuns: 25,
   maxTimers: 25,
   maxDurationMs: 55_000,
@@ -121,19 +207,24 @@ Options:
 | Option | Purpose |
 | --- | --- |
 | `now` | Current timestamp used for due checks. |
-| `limit` | Backward-compatible shared limit for schedules and timers. |
+| `limit` | Backward-compatible shared limit for recoveries, schedules, and timers. |
+| `maxRecoveredRuns` | Maximum expired running executions to recover. |
 | `maxScheduledRuns` | Maximum due schedule buckets to start. |
 | `maxTimers` | Maximum due timers to resume. |
+| `deadline` | Absolute wall-clock deadline in UTC milliseconds. |
 | `maxDurationMs` | Wall-clock budget for this sweep. |
+| `minYieldRemainingMs` | Stops claims and fresh durable work inside this margin. |
 | `leaseOwner` | Worker identity for claimed work. |
 | `leaseMs` | Lease duration. |
 | `includeEvents` | Whether to retain emitted events. Sweeps usually set false. |
 | `maxEvents` | Maximum retained events per run result. |
+| `publish` | Best-effort live event publisher for every driven run. |
 
 Result:
 
 ```ts
 interface WorkflowRuntimeSweepResult {
+  recovered: ReadonlyArray<WorkflowRuntimeRunResult>
   scheduled: ReadonlyArray<WorkflowRuntimeRunResult>
   timers: ReadonlyArray<WorkflowRuntimeRunResult>
   summary: WorkflowRuntimeSweepSummary
